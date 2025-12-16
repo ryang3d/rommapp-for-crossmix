@@ -1,20 +1,20 @@
 import os
 import re
+import ssl
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request, urlopen, build_opener, HTTPSHandler
 
 import sdl2
 from filesystem import Filesystem
 from glyps import glyphs
 from semver import Version
 from status import Status
-from ui import UserInterface
 
 
 class Update:
     github_repo = "rommapp/muos-app"
 
-    def __init__(self, ui: UserInterface) -> None:
+    def __init__(self, ui):
         self.ui = ui
         self.status = Status()
         self.filesystem = Filesystem()
@@ -44,11 +44,55 @@ class Update:
 
         return v1 < v2
 
+    def _create_ssl_opener(self):
+        """Create a URL opener with proper SSL certificate verification."""
+        ssl_context = None
+        cert_file = None
+        
+        # First, check if SSL_CERT_FILE environment variable is set
+        if os.getenv("SSL_CERT_FILE"):
+            env_cert_file = os.getenv("SSL_CERT_FILE")
+            if os.path.exists(env_cert_file):
+                cert_file = env_cert_file
+        
+        # If no env var, try to use certifi if available (provides bundled CA certificates)
+        if not cert_file:
+            try:
+                import certifi
+                cert_file = certifi.where()
+            except ImportError:
+                pass
+        
+        # If still no cert file, try common system certificate locations
+        if not cert_file:
+            common_cert_paths = [
+                "/etc/ssl/certs/ca-certificates.crt",  # Debian/Ubuntu
+                "/etc/pki/tls/certs/ca-bundle.crt",    # RHEL/CentOS/Fedora
+                "/etc/ssl/ca-bundle.pem",              # Some systems
+                "/usr/share/ssl/certs/ca-bundle.crt",  # Some older systems
+            ]
+            
+            for cert_path in common_cert_paths:
+                if os.path.exists(cert_path):
+                    cert_file = cert_path
+                    break
+        
+        # Create SSL context with the found certificate file, or use default
+        if cert_file:
+            ssl_context = ssl.create_default_context(cafile=cert_file)
+        else:
+            # Fallback to default context (should work if system certs are properly configured)
+            ssl_context = ssl.create_default_context()
+        
+        https_handler = HTTPSHandler(context=ssl_context)
+        return build_opener(https_handler)
+
     def get_latest_release_info(self) -> dict | None:
         url = f"https://api.github.com/repos/{self.github_repo}/releases/latest"
         try:
             request = Request(url, headers={"Accept": "application/vnd.github.v3+json"})
-            with urlopen(request, timeout=5) as response:  # trunk-ignore(bandit/B310)
+            opener = self._create_ssl_opener()
+            with opener.open(request, timeout=5) as response:  # trunk-ignore(bandit/B310)
                 data = response.read().decode("utf-8")
                 import json
 
@@ -61,7 +105,8 @@ class Update:
         update_filename = os.path.basename(url)
         try:
             request = Request(url)
-            with urlopen(request) as response:  # trunk-ignore(bandit/B310)
+            opener = self._create_ssl_opener()
+            with opener.open(request) as response:  # trunk-ignore(bandit/B310)
                 self.total_size = int(response.getheader("Content-Length", 0)) or 1
                 self.download_percent = 0.0
                 downloaded_bytes = 0

@@ -221,3 +221,35 @@ def init_env_maps():
         _env_maps = _load_env_maps()
     if _env_platforms is None:
         _env_platforms = frozenset(_env_maps.keys())
+
+
+def get_mapped_folder_name(platform_slug: str, is_muos: bool, is_spruceos: bool) -> str:
+    """
+    Get the mapped folder name for a platform slug, considering all mappings including CUSTOM_MAPS.
+    This is used for filtering platforms/ROMs before they're processed.
+    """
+    platform_slug = platform_slug.lower()
+    
+    # Initialize env maps if not already done
+    if _env_maps is None:
+        init_env_maps()
+    
+    # Check CUSTOM_MAPS first (highest priority)
+    if _env_maps and platform_slug in _env_maps:
+        return _env_maps[platform_slug]
+    
+    # Check OS-specific maps
+    if is_muos:
+        return MUOS_SUPPORTED_PLATFORMS_FS_MAP.get(platform_slug, platform_slug)
+    
+    if is_spruceos:
+        return SPRUCEOS_SUPPORTED_PLATFORMS_FS_MAP.get(platform_slug, platform_slug)
+    
+    # Check ES_FOLDER_MAP for non-OS systems
+    es_result = ES_FOLDER_MAP.get(platform_slug, (platform_slug, platform_slug))
+    if isinstance(es_result, tuple):
+        mapped_folder = es_result[0]
+    else:
+        mapped_folder = es_result
+    
+    return mapped_folder

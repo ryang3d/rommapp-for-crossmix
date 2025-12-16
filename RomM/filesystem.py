@@ -8,17 +8,12 @@ from models import Rom
 class Filesystem:
     _instance: Optional["Filesystem"] = None
 
-    # Check if app is running on muOS
+    # Check if the app is running on muOS
     is_muos = os.path.exists("/mnt/mmc/MUOS")
-
-    # Check is app is running on SpruceOS
-    is_spruceos = os.path.exists("/mnt/SDCARD/spruce")
 
     # Storage paths for ROMs
     _sd1_roms_storage_path: str
-    _sd2_roms_storage_path: str | None = None
-    _sd1_catalogue_path: str | None = None
-    _sd2_catalogue_path: str | None = None
+    _sd2_roms_storage_path: str | None
 
     # Resources path: Use current working directory + "resources"
     resources_path = os.path.join(os.getcwd(), "resources")
@@ -37,24 +32,18 @@ class Filesystem:
         if self.is_muos:
             self._sd1_roms_storage_path = "/mnt/mmc/ROMS"
             self._sd2_roms_storage_path = "/mnt/sdcard/ROMS"
-            self._sd1_catalogue_path = "/mnt/mmc/MUOS/info/catalogue"
-            self._sd2_catalogue_path = "/mnt/sdcard/MUOS/info/catalogue"
-        elif self.is_spruceos:
-            self._sd1_roms_storage_path = "/mnt/SDCARD/Roms"
         else:
             # Go up two levels from the script's directory (e.g., from roms/ports/romm to roms/)
             base_path = os.path.abspath(os.path.join(os.getcwd(), "..", ".."))
             # Default to the ROMs directory, overridable via environment variable
             self._sd1_roms_storage_path = os.environ.get("ROMS_STORAGE_PATH", base_path)
+            self._sd2_roms_storage_path = None
 
         # Ensure the ROMs storage path exists
         if self._sd2_roms_storage_path and not os.path.exists(
             self._sd2_roms_storage_path
         ):
-            try:
-                os.mkdir(self._sd2_roms_storage_path)
-            except FileNotFoundError:
-                print("Cannot create SD2 storage path", self._sd2_roms_storage_path)
+            os.mkdir(self._sd2_roms_storage_path)
 
         # Set the default SD card based on the existence of the storage path
         self._current_sd = int(
@@ -76,33 +65,15 @@ class Filesystem:
         return self._sd2_roms_storage_path
 
     def _get_platform_storage_dir_from_mapping(self, platform: str) -> str:
-        """
-        Return the platform-specific storage path,
-        using MUOS mapping if on muOS,
-        or SpruceOS mapping if on SpruceOS,
-        or using ES mapping if available.
-        """
+        """Return the platform-specific storage path, using MUOS mapping if on muOS,
+        or using ES mapping if available."""
 
-        # First check if the platform has an entry in the ES map
-        platform_dir = platform_maps.ES_FOLDER_MAP.get(platform, platform)
-
-        # If the ES map returns a tuple, use the first element of the tuple
-        if isinstance(platform_dir, tuple):
-            platform_dir = platform_dir[0]
-
-        # If running on muOS, override the platform_dir with the MUOS mapping
-        if self.is_muos:
-            platform_dir = platform_maps.MUOS_SUPPORTED_PLATFORMS_FS_MAP.get(
-                platform, platform_dir
-            )
-
-        if self.is_spruceos:
-            platform_dir = platform_maps.SPRUCEOS_SUPPORTED_PLATFORMS_FS_MAP.get(
-                platform, platform_dir
-            )
-
-        if platform_maps._env_maps and platform in platform_maps._env_platforms:
-            platform_dir = platform_maps._env_maps.get(platform, platform_dir)
+        # Use get_mapped_folder_name which properly checks CUSTOM_MAPS first
+        # For unsupported Linux OS, is_muos=False and is_spruceos=False
+        is_spruceos = False  # Add detection if needed, or keep False for unsupported OS
+        platform_dir = platform_maps.get_mapped_folder_name(
+            platform, self.is_muos, is_spruceos
+        )
 
         return platform_dir
 
@@ -115,20 +86,6 @@ class Filesystem:
             platforms_dir = self._get_platform_storage_dir_from_mapping(platform)
             return os.path.join(self._sd2_roms_storage_path, platforms_dir)
         return None
-
-    def get_sd1_catalogue_platform_path(self, platform: str) -> str:
-        if not self._sd1_catalogue_path:
-            raise ValueError("SD1 catalogue path is not set.")
-
-        platforms_dir = self._get_platform_storage_dir_from_mapping(platform)
-        return os.path.join(self._sd1_catalogue_path, platforms_dir)
-
-    def get_sd2_catalogue_platform_path(self, platform: str) -> str:
-        if not self._sd2_catalogue_path:
-            raise ValueError("SD2 catalogue path is not set.")
-
-        platforms_dir = self._get_platform_storage_dir_from_mapping(platform)
-        return os.path.join(self._sd2_catalogue_path, platforms_dir)
 
     ###
     # PUBLIC METHODS
@@ -157,17 +114,10 @@ class Filesystem:
 
         return self._get_sd1_platforms_storage_path(platform)
 
-    def get_catalogue_platform_path(self, platform: str) -> str:
-        """Return the catalogue path for a specific platform."""
-        if self._current_sd == 2:
-            return self.get_sd2_catalogue_platform_path(platform)
-
-        return self.get_sd1_catalogue_platform_path(platform)
-
     def is_rom_in_device(self, rom: Rom) -> bool:
         """Check if a ROM exists in the storage path."""
         rom_path = os.path.join(
             self.get_platforms_storage_path(rom.platform_slug),
-            rom.fs_name if not rom.has_multiple_files else f"{rom.fs_name}.m3u",
+            rom.fs_name if not rom.multi else f"{rom.fs_name}.m3u",
         )
         return os.path.exists(rom_path)

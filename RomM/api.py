@@ -1,5 +1,4 @@
 import base64
-import datetime
 import json
 import math
 import os
@@ -12,11 +11,13 @@ from urllib.request import Request, urlopen
 
 import platform_maps
 from filesystem import Filesystem
-from imageutils import ImageUtils
 from models import Collection, Platform, Rom
 from PIL import Image
 from status import Status, View
 
+# Source - https://stackoverflow.com/a
+# Posted by Jahid, modified by community. See post 'Timeline' for change history
+# Retrieved 2025-12-12, License - CC BY-SA 3.0
 
 class API:
     _platforms_endpoint = "api/platforms"
@@ -30,9 +31,8 @@ class API:
     def __init__(self):
         self.status = Status()
         self.file_system = Filesystem()
-        self.image_utils = ImageUtils()
 
-        self.host = os.getenv("HOST", "").strip("/")
+        self.host = os.getenv("HOST", "")
         self.username = os.getenv("USERNAME", "")
         self.password = os.getenv("PASSWORD", "")
         self.headers = {}
@@ -40,11 +40,6 @@ class API:
         self._include_collections = set(self._getenv_list("INCLUDE_COLLECTIONS"))
         self._exclude_collections = set(self._getenv_list("EXCLUDE_COLLECTIONS"))
         self._collection_type = os.getenv("COLLECTION_TYPE", "collection")
-        self._download_assets = os.getenv("DOWNLOAD_ASSETS", "false") in ("true", "1")
-        self._fullscreen_assets = os.getenv("FULLSCREEN_ASSETS", "false") in (
-            "true",
-            "1",
-        )
 
         if self.username and self.password:
             credentials = f"{self.username}:{self.password}"
@@ -242,13 +237,12 @@ class API:
             self.status.valid_host = False
             self.status.valid_credentials = False
             return
-
         platforms = json.loads(response.read().decode("utf-8"))
         _platforms: list[Platform] = []
 
-        # Get the list of subfolders in the ROMs directory for PM filtering
+        # Get the list of subfolders in the ROMs directory for non-muOS filtering
         roms_subfolders = set()
-        if not self.file_system.is_muos and not self.file_system.is_spruceos:
+        if not self.file_system.is_muos:
             roms_path = self.file_system.get_roms_storage_path()
             print(f"ROMs path: {roms_path}")
             if os.path.exists(roms_path):
@@ -260,31 +254,20 @@ class API:
 
         for platform in platforms:
             if platform["rom_count"] > 0:
-                platform_slug: str = platform["slug"].lower()
-                if (
-                    platform_maps._env_maps
-                    and platform_slug in platform_maps._env_platforms
-                    and platform_slug not in self._exclude_platforms
-                ):
-                    # A custom map from the .env was found, no need to check defaults
-                    pass
-                elif self.file_system.is_muos:
+                platform_slug = platform["slug"].lower()
+                if self.file_system.is_muos:
+                    # Check if platform is supported (either in MUOS map or CUSTOM_MAPS)
                     if (
                         platform_slug not in platform_maps.MUOS_SUPPORTED_PLATFORMS
-                        or platform_slug in self._exclude_platforms
-                    ):
-                        continue
-                elif self.file_system.is_spruceos:
-                    if (
-                        platform_slug not in platform_maps.SPRUCEOS_SUPPORTED_PLATFORMS
+                        and platform_slug not in (platform_maps._env_platforms or set())
                         or platform_slug in self._exclude_platforms
                     ):
                         continue
                 else:
-                    # Map the slug to the folder name for non-muOS
-                    mapped_folder, icon_file = platform_maps.ES_FOLDER_MAP.get(
-                        platform_slug.lower(), (platform_slug, platform_slug)
-                    )
+                    # Map the slug to the folder name for non-muOS, using Filesystem method
+                    mapped_folder = self.file_system._get_platform_storage_dir_from_mapping(platform_slug)
+                    # Extract just the folder name (remove the full path)
+                    mapped_folder = os.path.basename(mapped_folder) if os.path.sep in mapped_folder else mapped_folder
                     if (
                         mapped_folder.lower() not in roms_subfolders
                         or platform_slug in self._exclude_platforms
@@ -420,7 +403,7 @@ class API:
 
         try:
             request = Request(
-                f"{self.host}/{self._roms_endpoint}?{view}_id={id}&order_by=name&order_dir=asc&limit=10000",
+                f"{self.host}/{self._roms_endpoint}?{view}_id={id}&order_by=name&order_dir=asc&limit=1000",
                 headers=self.headers,
             )
         except ValueError:
@@ -456,7 +439,7 @@ class API:
 
         # Get the list of subfolders in the ROMs directory for non-muOS filtering
         roms_subfolders = set()
-        if not self.file_system.is_muos and not self.file_system.is_spruceos:
+        if not self.file_system.is_muos:
             roms_path = self.file_system.get_roms_storage_path()
             if os.path.exists(roms_path):
                 roms_subfolders = {
@@ -467,66 +450,37 @@ class API:
 
         _roms = []
         for rom in roms:
-            platform_slug: str = rom["platform_slug"].lower()
-            if (
-                platform_maps._env_maps
-                and platform_slug in platform_maps._env_platforms
-            ):
-                pass
-            elif self.file_system.is_muos:
+            platform_slug = rom["platform_slug"].lower()
+            if self.file_system.is_muos:
                 if platform_slug not in platform_maps.MUOS_SUPPORTED_PLATFORMS:
-                    continue
-            elif self.file_system.is_spruceos:
-                if platform_slug not in platform_maps.SPRUCEOS_SUPPORTED_PLATFORMS:
-                    continue
+                    # Check if it's in CUSTOM_MAPS
+                    if platform_maps._env_maps is None:
+                        platform_maps.init_env_maps()
+                    if platform_slug not in (platform_maps._env_platforms or set()):
+                        continue
             else:
-                mapped_folder, icon_file = platform_maps.ES_FOLDER_MAP.get(
-                    platform_slug.lower(), (platform_slug, platform_slug)
-                )
+                # Map the slug to the folder name for non-muOS, using Filesystem method
+                mapped_folder = self.file_system._get_platform_storage_dir_from_mapping(platform_slug)
+                # Extract just the folder name (remove the full path)
+                mapped_folder = os.path.basename(mapped_folder) if os.path.sep in mapped_folder else mapped_folder
                 if mapped_folder.lower() not in roms_subfolders:
                     continue
-
             if view == View.PLATFORMS and platform_slug != selected_platform_slug:
                 continue
-
-            metadatum = rom.get("metadatum", {})
             _roms.append(
                 Rom(
                     id=rom["id"],
-                    platform_id=rom["platform_id"],
-                    platform_slug=rom["platform_slug"],
+                    name=rom["name"],
                     fs_name=rom["fs_name"],
-                    fs_name_no_tags=rom["fs_name_no_tags"],
-                    fs_name_no_ext=rom["fs_name_no_ext"],
+                    platform_slug=rom["platform_slug"],
                     fs_extension=rom["fs_extension"],
                     fs_size=self._human_readable_size(rom["fs_size_bytes"]),
                     fs_size_bytes=rom["fs_size_bytes"],
-                    name=rom["name"],
-                    slug=rom["slug"],
-                    summary=rom["summary"],
-                    youtube_video_id=rom.get("youtube_video_id", None),
-                    path_cover_small=rom["path_cover_small"],
-                    path_cover_large=rom["path_cover_large"],
-                    is_identified=rom["is_identified"],
-                    revision=rom.get("revision", None),
-                    regions=rom.get("regions", []),
-                    languages=rom.get("languages", []),
-                    tags=rom.get("tags", []),
-                    crc_hash=rom.get("crc_hash", ""),
-                    md5_hash=rom.get("md5_hash", ""),
-                    sha1_hash=rom.get("sha1_hash", ""),
-                    has_simple_single_file=rom.get("has_simple_single_file", False),
-                    has_nested_single_file=rom.get("has_nested_single_file", False),
-                    has_multiple_files=rom.get("has_multiple_files", False),
-                    merged_screenshots=rom.get("merged_screenshots", []),
-                    genres=metadatum.get("genres", []),
-                    franchises=metadatum.get("franchises", []),
-                    collections=metadatum.get("collections", []),
-                    companies=metadatum.get("companies", []),
-                    game_modes=metadatum.get("game_modes", []),
-                    age_ratings=metadatum.get("age_ratings", []),
-                    first_release_date=metadatum.get("first_release_date", None),
-                    average_rating=metadatum.get("average_rating", None),
+                    multi=rom["multi"],
+                    languages=rom["languages"],
+                    regions=rom["regions"],
+                    revision=rom["revision"],
+                    tags=rom["tags"],
                 )
             )
 
@@ -539,7 +493,7 @@ class API:
         self, valid_host: bool = False, valid_credentials: bool = False
     ) -> None:
         self.status.total_downloaded_bytes = 0
-        self.status.downloaded_percent = 0.0
+        self.status.downloaded_percent = 0
         self.status.valid_host = valid_host
         self.status.valid_credentials = valid_credentials
         self.status.downloading_rom = None
@@ -559,7 +513,38 @@ class API:
                 self._sanitize_filename(rom.fs_name),
             )
             url = f"{self.host}/{self._roms_endpoint}/{rom.id}/content/{quote(rom.fs_name)}?hidden_folder=true"
-            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+            
+            # Fix: Handle case-insensitive filesystems - ensure directory exists
+            dest_dir = os.path.dirname(dest_path)
+            try:
+                os.makedirs(dest_dir, exist_ok=True)
+            except (FileExistsError, OSError):
+                # On case-insensitive filesystems, the directory might exist with different casing
+                # Try to verify it's actually a directory and not a file
+                parent_dir = os.path.dirname(dest_dir)
+                if os.path.exists(parent_dir) and os.path.isdir(parent_dir):
+                    # Check if any subdirectory matches (case-insensitive)
+                    dest_dir_name = os.path.basename(dest_dir)
+                    found_dir = None
+                    try:
+                        for item in os.listdir(parent_dir):
+                            if item.lower() == dest_dir_name.lower():
+                                item_path = os.path.join(parent_dir, item)
+                                if os.path.isdir(item_path):
+                                    found_dir = item_path
+                                    break
+                    except (OSError, PermissionError):
+                        pass
+                    
+                    if found_dir:
+                        # Use the existing directory with correct casing
+                        dest_path = os.path.join(found_dir, os.path.basename(dest_path))
+                    else:
+                        print(f"Error: Cannot create or access directory {dest_dir}. Skipping {rom.name}")
+                        continue
+                else:
+                    print(f"Error: Cannot create directory {dest_dir}. Skipping {rom.name}")
+                    continue
 
             try:
                 print(f"Fetching: {url}")
@@ -567,7 +552,6 @@ class API:
             except ValueError:
                 self._reset_download_status()
                 return
-
             try:
                 if request.type not in ("http", "https"):
                     self._reset_download_status()
@@ -599,11 +583,10 @@ class API:
                             self._reset_download_status(True, True)
                             os.remove(dest_path)
                             return
-
                 # Handle multi-file (ZIP) ROMs
-                if rom.has_multiple_files:
+                if rom.multi:
                     self.status.extracting_rom = True
-                    print("Multi-file rom detected. Extracting...")
+                    print("Multi file rom detected. Extracting...")
                     with zipfile.ZipFile(dest_path, "r") as zip_ref:
                         total_size = sum(file.file_size for file in zip_ref.infolist())
                         extracted_size = 0
@@ -614,7 +597,35 @@ class API:
                                     os.path.dirname(dest_path),
                                     self._sanitize_filename(file.filename),
                                 )
-                                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                                # Fix: Handle case-insensitive filesystems - ensure directory exists
+                                file_dir = os.path.dirname(file_path)
+                                try:
+                                    os.makedirs(file_dir, exist_ok=True)
+                                except (FileExistsError, OSError):
+                                    # Check if directory exists with different casing
+                                    parent_dir = os.path.dirname(file_dir)
+                                    if os.path.exists(parent_dir) and os.path.isdir(parent_dir):
+                                        file_dir_name = os.path.basename(file_dir)
+                                        found_dir = None
+                                        try:
+                                            for item in os.listdir(parent_dir):
+                                                if item.lower() == file_dir_name.lower():
+                                                    item_path = os.path.join(parent_dir, item)
+                                                    if os.path.isdir(item_path):
+                                                        found_dir = item_path
+                                                        break
+                                        except (OSError, PermissionError):
+                                            pass
+                                        
+                                        if found_dir:
+                                            # Use the existing directory with correct casing
+                                            file_path = os.path.join(found_dir, os.path.basename(file_path))
+                                        else:
+                                            print(f"Error: Cannot create directory {file_dir}. Skipping file.")
+                                            continue
+                                    else:
+                                        print(f"Error: Cannot create directory {file_dir}. Skipping file.")
+                                        continue
                                 with (
                                     zip_ref.open(file) as source,
                                     open(file_path, "wb") as target,
@@ -645,64 +656,5 @@ class API:
             except URLError:
                 self._reset_download_status(valid_host=True)
                 return
-
-            # Check if the catalogue path is set and valid
-            catalogue_path = self.file_system.get_catalogue_platform_path(
-                rom.platform_slug
-            )
-            if not catalogue_path:
-                continue
-
-            filename = self._sanitize_filename(rom.fs_name_no_ext)
-            if rom.summary:
-                text_path = os.path.join(
-                    catalogue_path,
-                    "text",
-                    f"{filename}.txt",
-                )
-                os.makedirs(os.path.dirname(text_path), exist_ok=True)
-                with open(text_path, "w") as f:
-                    f.write(rom.summary)
-                    f.write("\n\n")
-
-                    if rom.first_release_date:
-                        dt = datetime.datetime.fromtimestamp(
-                            rom.first_release_date / 1000
-                        )
-                        formatted_date = dt.strftime("%Y-%m-%d")
-                        f.write(f"First release date: {formatted_date}\n")
-
-                    if rom.average_rating:
-                        f.write(f"Average rating: {rom.average_rating}\n")
-
-                    if rom.genres:
-                        f.write(f"Genres: {', '.join(rom.genres)}\n")
-
-                    if rom.franchises:
-                        f.write(f"Franchises: {', '.join(rom.franchises)}\n")
-
-                    if rom.companies:
-                        f.write(f"Companies: {', '.join(rom.companies)}\n")
-
-            # Don't download covers and previews if the user disabled the option
-            if not self._download_assets:
-                continue
-
-            box_path = os.path.join(catalogue_path, "box", f"{filename}.png")
-            preview_path = os.path.join(catalogue_path, "preview", f"{filename}.png")
-
-            # Download cover and preview images
-            os.makedirs(os.path.dirname(box_path), exist_ok=True)
-            os.makedirs(os.path.dirname(preview_path), exist_ok=True)
-
-            self.image_utils.process_assets(
-                fullscreen=self._fullscreen_assets,
-                cover_url=rom.path_cover_small,
-                screenshot_urls=rom.merged_screenshots,
-                box_path=box_path,
-                preview_path=preview_path,
-                headers=self.headers,
-            )
-
         # End of download
         self._reset_download_status(valid_host=True, valid_credentials=True)
