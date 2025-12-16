@@ -4,7 +4,7 @@
 
   <img src=".github/resources/isotipo.png" height="180px" width="auto" alt="romm-muos logo">
     <h3 style="font-size: 25px;">
-    A beautiful, powerful, RomM app for muOS.
+    A beautiful, powerful, RomM app for Crossmix OS.
   </h3>
 
 <br>
